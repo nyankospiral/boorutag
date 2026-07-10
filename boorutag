@@ -1,0 +1,137 @@
+#!/bin/bash
+CONFIG_DIR="${HOME}/.config/boorutag"
+KEYS="${CONFIG_DIR}/api_keys"
+mkdir -p ${CONFIG_DIR}
+
+usage () {
+	echo "Usage:  boorutag [FLAGS] file(s)
+boorutag [FLAGS] -d [DIRECTORY]
+
+Example: boorutag -oU -S d -d ~/Pictures/homework
+  ((o)verwrites tags, (U)pscales samples, only (S)ite danbooru, on each file in ~/Pictures/homework
+	
+  Flags: (indev ver. ! marked tags not implemented)
+  !-d [dir]   run on all files of given directory
+  -t [0-2]   tag format [0(default): both | 1: IPTC | 2: XMP]
+  !-S [site]  search only in given site [(g)elbooru, (d)anbooru, (r)ule34]
+  !-r 	     disable reverse image search fallback
+  !-u 	     always download full-res image for samples if available
+  !-U 	     same as -u but OVERWRITES the image (its gone for good!)
+  -o	     overwrite existing tag/exif data
+  -h	     display this help message
+  !-s	     silent mode (no output)
+  !-v	     verbose mode (more output)" >&2;
+	exit 1
+}
+
+while getopts ":osvhuUrt:d:S:" opt; do
+	case $opt in
+		s) silent="1" ;;
+		u) alwaysUpscale="1" ;;
+		o) clearData="1" ;;
+		t) tagFormat="$OPTARG" ;;
+		S) knownSource="$OPTARG" ;;
+		d) directory="$OPTARG" ;;
+		r) reverseFallback="0" ;;
+		h) usage ;;
+		?) echo "Error: Invalid flag -$OPTARG" >&2; exit 2 ;;
+		:) echo "Error: -$OPTARG requires an argument" >&2; exit 2 ;;
+	esac
+done
+shift "$(($OPTIND -1))"
+
+source "$KEYS"
+
+#look for keys, prompt if they dont exist
+if [[ -z ${gelApi} ]]; then
+	echo "Gelbooru API key not found, enter it to proceed"
+	read -r gelApi
+	: > "$KEYS"
+	printf 'gelApi="%s"\n' "$gelApi" >> "$KEYS"
+fi
+
+#base link for searches using md5
+gelLink="https://gelbooru.com/index.php?page=dapi&s=post&q=index${gelApi}&tags=md5:"
+
+#extract MD5 hash from filename if it exists, return 1 on fail
+#expects filename (basename)
+getMD5 () {
+	local outMD5=$(grep -oP "[a-f\d]{32}" <<< $1)
+	if [[ -z ${outMD5} ]]; then 
+		echo "failed to find MD5 data of file $1" >&2
+		exit 3
+	else
+		echo ${outMD5}
+	fi
+}
+
+#get xml from booru api and return tags
+fetchBooruData () {
+	local xmlResult=$(curl --silent --request GET "${gelLink}$1")
+	echo $(xmllint --xpath '//tags/text()' - <<<${xmlResult})
+}
+
+# sample (low-res) detection
+sampleCheck () {
+	if [[ $1 =~ "sample" ]]; then
+		echo "Current file detected as sample, download high-res? [Y/n]" >&2
+		read -r -s -n 1 ans
+		case $ans in
+			[Nn]) break ;;
+			[Yy]|"") sampleDownload INEEDTOPUTTHEDATAHEREPLEASEDONTFORGETJINGLEJINGLE ;;
+			*) echo 'Invalid option, answer Y or N.'; sampleCheck $1 ;;
+		esac
+	fi
+
+}
+
+sampleDownload () {
+
+}
+
+#set tags according to tag format (0 - both | 1 - IPTC | 2 - XMP), optionally clear existing tags before
+#expects string of space-seperated tags
+setTags () {
+	local file=$1
+	shift
+	local tags="$@"
+	#remove all exif, iptc, and xmp data
+	if [[ ${clearData} -eq "1" ]]; then exiv2 rm ${file}; fi
+
+	#iterate through tags and apply to IPTC 
+	if [[ ${tagFormat} -eq "0" || ${tagFormat} -eq "1" ]]; then
+		for t in ${tags}; do
+			exiv2 -M "add Iptc.Application2.Keywords '${t}'" ${file}
+		done
+	fi
+
+	#add commas and apply to XMP
+	if [[ ${tagFormat} -eq "0" || ${tagFormat} -eq "2" ]]; then
+		exiv2 -M "add Xmp.iptc.Keywords XmpBag ${tags// /, }" ${file}
+	fi
+
+}
+
+# declare -i progress
+# declare -i items=$#
+# progBar () {
+# 	progress+=1
+# 	local filled=$((progress * 20 / $items))
+# 	local bar=''
+# 	for ((i = 0; i < filled; i++)); do bar+='#'; done
+# 	for ((i = filled; i < 20; i++)); do bar+='-'; done
+# 	prct=$(($progress * 100 / $items))
+# 	printf '\r[%s] %3d%% %s' "$bar" "$prct	>&2
+#
+# }
+declare -i progress
+for f in "$@"; do
+	# progBar $f
+	progress+=1
+	echo "[${progress}/$#] - $f"
+	Filename=$(basename $f)
+	MD5=$(getMD5 ${Filename})
+	Tags=$(fetchBooruData ${MD5})
+	# sampleCheck $f
+	setTags $f ${Tags}
+done
