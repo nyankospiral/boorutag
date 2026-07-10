@@ -1,8 +1,20 @@
 #!/bin/bash
-CONFIG_DIR="${HOME}/.config/boorutag"
-KEYS="${CONFIG_DIR}/api_keys"
-mkdir -p ${CONFIG_DIR}
 
+#check for required commands, exit if failed
+required_commands=('xmllint' 'exiv2' 'curl')
+for cmd in "${required_commands[@]}"; do
+	if ! command -v ${cmd} >/dev/null 2>&1; then
+		missing_commands+=(${cmd})
+	fi
+done
+
+if (( ${#missing_commands[@]} > 0)); then
+	echo "Error: missing commands 
+	${missing_commands[@]}" >&2
+	exit 2
+fi
+
+#help command output
 usage () {
 	echo "Usage:  boorutag [FLAGS] file(s)
 boorutag [FLAGS] -d [DIRECTORY]
@@ -18,21 +30,32 @@ Example: boorutag -oU -S d -d ~/Pictures/homework
   !-u 	     always download full-res image for samples if available
   !-U 	     same as -u but OVERWRITES the image (its gone for good!)
   -o	     overwrite existing tag/exif data
-  -h	     display this help message
   !-s	     silent mode (no output)
-  !-v	     verbose mode (more output)" >&2;
+  !-v	     verbose mode (more output)
+  -h	     display this help message" >&2;
 	exit 1
 }
 
-while getopts ":osvhuUrt:d:S:" opt; do
+while getopts ":d:t:S:ruUosvh" opt; do
 	case $opt in
-		s) silent="1" ;;
-		u) alwaysUpscale="1" ;;
-		o) clearData="1" ;;
-		t) tagFormat="$OPTARG" ;;
-		S) knownSource="$OPTARG" ;;
-		d) directory="$OPTARG" ;;
+		d) if [[ -d ${OPTARG} ]]; then directory=${OPTARG}; else
+			echo "Error: flag -d | directory '${OPTARG}' not found or invalid" >&2; exit 2; fi ;;
+		t) if ! [[ ${OPTARG} =~ ^[0-2]$ ]]; then
+			echo "Error: flag -t | invalid option '${OPTARG}' - valid options are [0, 1, 2]" >&2; exit 2; else
+			tagFormat=${OPTARG}; fi ;;
+		S) shopt -s nocasematch
+			case ${OPTARG} in 
+				g|gelbooru) ;;
+				d|danbooru) ;;
+				r|rule34) ;;
+				*) echo "Error: flag -S | invalid option '${OPTARG}' | boorutag -h for usage" >&2; exit 2 ;;
+			esac; shopt -u nocasematch;;
 		r) reverseFallback="0" ;;
+		u) alwaysUpscale="1" ;;
+		U) alwaysUpscale="2" ;;
+		o) clearData="1" ;;
+		s) silent="1" ;;
+		v) verbose="1" ;;
 		h) usage ;;
 		?) echo "Error: Invalid flag -$OPTARG" >&2; exit 2 ;;
 		:) echo "Error: -$OPTARG requires an argument" >&2; exit 2 ;;
@@ -40,6 +63,10 @@ while getopts ":osvhuUrt:d:S:" opt; do
 done
 shift "$(($OPTIND -1))"
 
+
+CONFIG_DIR="${HOME}/.config/boorutag"
+KEYS="${CONFIG_DIR}/api_keys"
+mkdir -p ${CONFIG_DIR}
 source "$KEYS"
 
 #look for keys, prompt if they dont exist
@@ -53,7 +80,7 @@ fi
 #base link for searches using md5
 gelLink="https://gelbooru.com/index.php?page=dapi&s=post&q=index${gelApi}&tags=md5:"
 
-#extract MD5 hash from filename if it exists, return 1 on fail
+#extract MD5 hash from filename if it exists, return 3 on fail
 #expects filename (basename)
 getMD5 () {
 	local outMD5=$(grep -oP "[a-f\d]{32}" <<< $1)
@@ -85,10 +112,6 @@ sampleCheck () {
 
 }
 
-sampleDownload () {
-
-}
-
 #set tags according to tag format (0 - both | 1 - IPTC | 2 - XMP), optionally clear existing tags before
 #expects string of space-seperated tags
 setTags () {
@@ -112,26 +135,18 @@ setTags () {
 
 }
 
-# declare -i progress
-# declare -i items=$#
-# progBar () {
-# 	progress+=1
-# 	local filled=$((progress * 20 / $items))
-# 	local bar=''
-# 	for ((i = 0; i < filled; i++)); do bar+='#'; done
-# 	for ((i = filled; i < 20; i++)); do bar+='-'; done
-# 	prct=$(($progress * 100 / $items))
-# 	printf '\r[%s] %3d%% %s' "$bar" "$prct	>&2
-#
-# }
 declare -i progress
 for f in "$@"; do
-	# progBar $f
 	progress+=1
+	if ! [[ -r $f && -w $f ]]; then
+		echo "Error: read/write error on file '$f', skipping." >&2;
+		continue;
+	fi
 	echo "[${progress}/$#] - $f"
 	Filename=$(basename $f)
 	MD5=$(getMD5 ${Filename})
 	Tags=$(fetchBooruData ${MD5})
 	# sampleCheck $f
 	setTags $f ${Tags}
+	sleep 0.1 #good enough for rate limiting :3
 done
