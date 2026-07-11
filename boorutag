@@ -24,7 +24,7 @@ Example: boorutag -oU -S d -d ~/Pictures/homework
 	
   Flags: (indev ver. ! marked tags not implemented)
   !-d [dir]   run on all files of given directory
-  -t [0-2]   tag format [0(default): both | 1: IPTC | 2: XMP]
+  -t [IX]     tag format to write [(I)PTC and/or (X)MP] (default: IX) 
   !-S [site]  search only in given site [(g)elbooru, (d)anbooru, (r)ule34]
   !-r 	     disable reverse image search fallback
   !-u 	     always download full-res image for samples if available
@@ -40,9 +40,9 @@ while getopts ":d:t:S:ruUosvh" opt; do
 	case $opt in
 		d) if [[ -d ${OPTARG} ]]; then directory=${OPTARG}; else
 			echo "Error: flag -d | directory '${OPTARG}' not found or invalid" >&2; exit 2; fi ;;
-		t) if ! [[ ${OPTARG} =~ ^[0-2]$ ]]; then
-			echo "Error: flag -t | invalid option '${OPTARG}' - valid options are [0, 1, 2]" >&2; exit 2; else
-			tagFormat=${OPTARG}; fi ;;
+		t) if ! [[ ${OPTARG} =~ ^([Ii]?[Xx]?$|^[Xx]?[Ii]?)$ ]]; then
+			echo "Error: flag -t | invalid option '${OPTARG}' - valid options are [I,X,IX]" >&2; exit 2; else
+			tag_format="${OPTARG^^}"; fi ;;
 		S) shopt -s nocasematch
 			case ${OPTARG} in 
 				g|gelbooru) ;;
@@ -50,10 +50,10 @@ while getopts ":d:t:S:ruUosvh" opt; do
 				r|rule34) ;;
 				*) echo "Error: flag -S | invalid option '${OPTARG}' | boorutag -h for usage" >&2; exit 2 ;;
 			esac; shopt -u nocasematch;;
-		r) reverseFallback="0" ;;
-		u) alwaysUpscale="1" ;;
-		U) alwaysUpscale="2" ;;
-		o) clearData="1" ;;
+		r) reverse_fallback="0" ;;
+		u) always_upscale="1" ;;
+		U) always_upscale="2" ;;
+		o) overwrite_tags="1" ;;
 		s) silent="1" ;;
 		v) verbose="1" ;;
 		h) usage ;;
@@ -62,6 +62,7 @@ while getopts ":d:t:S:ruUosvh" opt; do
 	esac
 done
 shift "$(($OPTIND -1))"
+tag_format=${tag_format:-XI}
 
 
 CONFIG_DIR="${HOME}/.config/boorutag"
@@ -78,7 +79,7 @@ if [[ -z ${gelApi} ]]; then
 fi
 
 #base link for searches using md5
-gelLink="https://gelbooru.com/index.php?page=dapi&s=post&q=index${gelApi}&tags=md5:"
+gel_link="https://gelbooru.com/index.php?page=dapi&s=post&q=index${gelApi}&tags=md5:"
 
 #extract MD5 hash from filename if it exists, return 3 on fail
 #expects filename (basename)
@@ -94,8 +95,8 @@ getMD5 () {
 
 #get xml from booru api and return tags
 fetchBooruData () {
-	local xmlResult=$(curl --silent --request GET "${gelLink}$1")
-	echo $(xmllint --xpath '//tags/text()' - <<<${xmlResult})
+	local xml_result=$(curl --silent --request GET "${gel_link}$1")
+	echo $(xmllint --xpath '//tags/text()' - <<<${xml_result})
 }
 
 # sample (low-res) detection
@@ -112,6 +113,11 @@ sampleCheck () {
 
 }
 
+#check for existing iptc or xmp data, return 0 if empty, 1 if not
+checkTags () {
+	[[ -n $(exiv2 -P ${tag_format}kyct $1) ]]; return $?
+}
+
 #set tags according to tag format (0 - both | 1 - IPTC | 2 - XMP), optionally clear existing tags before
 #expects string of space-seperated tags
 setTags () {
@@ -119,17 +125,17 @@ setTags () {
 	shift
 	local tags="$@"
 	#remove all exif, iptc, and xmp data
-	if [[ ${clearData} -eq "1" ]]; then exiv2 rm ${file}; fi
+	if [[ ${overwrite_tags} -eq "1" ]]; then exiv2 rm ${file}; fi
 
 	#iterate through tags and apply to IPTC 
-	if [[ ${tagFormat} -eq "0" || ${tagFormat} -eq "1" ]]; then
+	if [[ $tag_format =~ I ]]; then
 		for t in ${tags}; do
 			exiv2 -M "add Iptc.Application2.Keywords '${t}'" ${file}
 		done
 	fi
 
 	#add commas and apply to XMP
-	if [[ ${tagFormat} -eq "0" || ${tagFormat} -eq "2" ]]; then
+	if [[ ${tag_format} =~ X ]]; then
 		exiv2 -M "add Xmp.iptc.Keywords XmpBag ${tags// /, }" ${file}
 	fi
 
@@ -138,11 +144,20 @@ setTags () {
 declare -i progress
 for f in "$@"; do
 	progress+=1
+	echo "[${progress}/$#] - $f"
+
+	#check that file exists and is r/w capable
 	if ! [[ -r $f && -w $f ]]; then
 		echo "Error: read/write error on file '$f', skipping." >&2;
 		continue;
 	fi
-	echo "[${progress}/$#] - $f"
+
+	#skip file if tags exist and overwrite is disabled
+	if [[ $overwrite_tags -ne 1 && $(checkTags $f) ]]; then
+		echo "Tags exist for file '$f', skipping." >&2;
+		continue;
+	fi
+
 	Filename=$(basename $f)
 	MD5=$(getMD5 ${Filename})
 	Tags=$(fetchBooruData ${MD5})
