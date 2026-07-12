@@ -9,10 +9,35 @@ for cmd in "${required_commands[@]}"; do
 done
 
 if (( ${#missing_commands[@]} > 0)); then
-	echo "${RED}ERROR:${NC} missing commands 
+	echo "${ERRORMSG} missing commands 
 	${missing_commands[@]}" >&2
 	exit 2
 fi
+
+CONFIG_DIR="${HOME}/.config/boorutag"
+KEYS="${CONFIG_DIR}/api_keys"
+mkdir -p ${CONFIG_DIR}
+source "$KEYS"
+
+RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+if [ ! -t 1 ]; then
+  RED=''; GREEN=''; YELLOW=''; NC=''
+fi
+ERRORMSG="${RED}[ERROR]${NC} - "; STATUSMSG="${YELLOW}[STATUS]${NC} - "
+logMsg () {
+	[[ ${silent} -gt 0 ]] && return 0
+	case $1 in
+		0) local msg_type='' ;;
+		1) local msg_type=${STATUSMSG} local void_logs=''; ;; 
+		2) local msg_type=${ERRORMSG} local void_logs=''; ;; 
+		3) local msg_type=${STATUSMSG}; local void_logs="/dev/null"; ;; 
+		4) local msg_type=${ERRORMSG}; local void_logs="/dev/null"; ;;
+	esac
+
+	#skip logging if opt 3/4, but still write to stderr
+	echo -e "${msg_type}$2\033[K" | tee -a "${LOG_DIR:-${CONFIG_DIR}}/latest.log" >&2
+
+}
 
 #help command output
 usage () {
@@ -25,6 +50,7 @@ Example: boorutag -oU -S d -d ~/Pictures/homework
   Flags: (indev ver. ! marked tags not implemented)
   !-d [dir]   run on all files of given directory
   -t [IX]     tag format to write [(I)PTC and/or (X)MP] (default: IX) 
+  -l [dir]    where to save log file to (defaults to '${CONFIG_DIR}/boorutag/latest.log')	
   !-S [site]  search only in given site [(g)elbooru, (d)anbooru, (r)ule34]
   -m	      generate and try matching against output of md5sum (THIS WILL WIPE EXIF DATA)
   -M	      same as -m, but also renames the file to correct MD5 if match is found
@@ -32,25 +58,26 @@ Example: boorutag -oU -S d -d ~/Pictures/homework
   !-u 	      always download full-res image for samples if available
   !-U 	      same as -u but OVERWRITES the image (its gone for good!)
   -o	      overwrite existing tag/exif data
-  !-s	      silent mode (no output)
+  -s	      silent mode (no output)
   !-v	      verbose mode (more output)
   -h	      display this help message" >&2;
 	exit 1
 }
 
-while getopts ":d:t:S:mMruUosvh" opt; do
+while getopts ":d:t:l:S:mMruUosvh" opt; do
 	case $opt in
 		d) if [[ -d ${OPTARG} ]]; then directory=${OPTARG}; else
-			echo "${RED}ERROR:${NC} flag -d | directory '${OPTARG}' not found or invalid" >&2; exit 2; fi ;;
+			logMsg 4 "flag -d | directory '${OPTARG}' not found or invalid"; exit 2; fi ;;
 		t) if ! [[ ${OPTARG} =~ ^([Ii]?[Xx]?$|^[Xx]?[Ii]?)$ ]]; then
-			echo "${RED}ERROR:${NC} flag -t | invalid option '${OPTARG}' - valid options are [I,X,IX]" >&2; exit 2; else
+			logMsg 4 "flag -t | invalid option '${OPTARG}' - valid options are [I,X,IX]"; exit 2; else
 			tag_format="${OPTARG^^}"; fi ;;
+		l) if [[ -d ${OPTARG} ]]; then LOG_DIR=${OPTARG}; else logMsg 4 "flag -l | expected directory but got '${OPTARG}'"; exit 2; fi ;;
 		S) shopt -s nocasematch
 			case ${OPTARG} in 
 				g|gelbooru) ;;
 				d|danbooru) ;;
 				r|rule34) ;;
-				*) echo "${RED}ERROR:${NC} flag -S | invalid option '${OPTARG}' | boorutag -h for usage" >&2; exit 2 ;;
+				*) logMsg 4 "flag -S | invalid option '${OPTARG}' | boorutag -h for usage"; exit 2 ;;
 			esac; shopt -u nocasematch;;
 		m) gen_md5="1" ;;
 		M) gen_md5="2" ;;
@@ -61,30 +88,17 @@ while getopts ":d:t:S:mMruUosvh" opt; do
 		s) silent="1" ;;
 		v) verbose="1" ;;
 		h) usage ;;
-		?) echo "${RED}ERROR:${NC} Invalid flag -$OPTARG" >&2; exit 2 ;;
-		:) echo "${RED}ERROR:${NC} -$OPTARG requires an argument" >&2; exit 2 ;;
+		?) logMsg 4 "Invalid flag -$OPTARG"; exit 2 ;;
+		:) logMsg 4 "OPTARG' requires an argument"; exit 2 ;;
 	esac
 done
 if [[ $# -eq 0 ]]; then usage; fi
 shift "$(($OPTIND -1))"
 tag_format=${tag_format:-XI}
-
-RED='\033[1;31m'
-GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-if [ ! -t 1 ]; then
-  RED=''
-  GREEN=''
-  YELLOW=''
-  NC=''
-fi
+LOG_DIR="${LOG_DIR:-${CONFIG_DIR}}"
+echo -e "〜ボールタグ(v0.4)\n" > "${LOG_DIR}/latest.log"
 
 
-CONFIG_DIR="${HOME}/.config/boorutag"
-KEYS="${CONFIG_DIR}/api_keys"
-mkdir -p ${CONFIG_DIR}
-source "$KEYS"
 
 #look for keys, prompt if they dont exist
 if [[ -z ${gelApi} ]]; then
@@ -103,7 +117,7 @@ getMD5 () {
 	local filename=$(basename $1)
 	local outMD5=$(grep -oP "[a-f\d]{32}" <<< $filename)
 	if [[ -n ${outMD5} ]]; then echo ${outMD5}; else
-		echo -e "${YELLOW}STATUS:${NC} failed to find MD5 data of file '$filename' in filename${gen_md5:+", trying from md5sum"}" >&2
+		logMsg 1 "Failed to find MD5 data of file '$filename' in filename${gen_md5:+", trying from md5sum"}"
 
 		if [[ ${gen_md5} -gt 0 ]]; then
 			exiv2 rm $1
@@ -130,10 +144,10 @@ fetchBooruData () {
 # sample (low-res) detection
 sampleCheck () {
 	if [[ $1 =~ "sample" ]]; then
-		echo "Current file detected as sample, download high-res? [Y/n]" >&2
+		logMsg 1 "File '$1' detected as sample, download high-res? [Y/n]"
 		read -r -s -n 1 ans
 		case $ans in
-			[Nn]) break ;;
+			[Nn]) return 1 ;;
 			[Yy]|"") sampleDownload INEEDTOPUTTHEDATAHEREPLEASEDONTFORGETJINGLEJINGLE ;;
 			*) echo 'Invalid option, answer Y or N.'; sampleCheck $1 ;;
 		esac
@@ -174,37 +188,60 @@ setTags () {
 		local new="${dir:+$dir/}${MD5}.${file##*.}"
 		if [[ ${file} != ${new} ]]; then
 		  	mv ${file} ${new}
-			echo -e "${YELLOW}STATUS:${NC} renamed '${new}'"
+			logMsg 1 "renamed '${file}' > '${new}'"
 		fi
 	fi
 
+	suc+=($new)
 
 }
 
-declare -i progress
+declare -a suc=()
+declare -a fail=()
 for f in "$@"; do
-	progress+=1
-	echo "[${progress}/$#] - $f"
+	[[ ! ${silent} -gt 0 ]] && echo -e "[${GREEN}${#suc[@]}${NC}|${RED}${#fail[@]}${NC}|$#] - $f"
 
 	#check that file exists and is r/w capable
 	if ! [[ -r $f && -w $f ]]; then
-		echo -e "${RED}ERROR:${NC} read/write error on file '$f', skipping." >&2
+		logMsg 2 "Read/write error on file '$f', skipping."
+		fail+=("$f [r/w error]")
+		continue
+	fi
+	
+	#check that file is a valid image
+	if ! [[ "${f##*.}" =~ jpg|jpeg|png ]]; then
+		logMsg 2 "File type error on file '$f', skipping."
+		fail+=("$f [filetype error]")
 		continue
 	fi
 
 	#skip file if tags exist and overwrite is disabled
-	if [[ $overwrite_tags -ne 1 && $(checkTags $f) ]]; then
-		echo -e "${YELLOW}STATUS:${NC}: Tags exist for file '$f', skipping." >&2
+	if [[ $overwrite_tags -ne 1 && ! $(checkTags $f) ]]; then
+		logMsg 1 "Tags exist for file '$f', skipping."
+		fail+=("$f [tags exist]")
 		continue
 	fi
 
 	MD5=$(getMD5 $f)
 	if Tags=$(fetchBooruData ${MD5}); then 
+		# sampleCheck $f
 		setTags $f ${Tags}
 	else
-		echo -e "${RED}ERROR:${NC} failed to retrieve tags for '$f', skipping" >&2
+		logMsg 2 "failed to retrieve tags for '$f', skipping"
+		fail+=("$f [tag fail]")
 		continue
 	fi
-	# sampleCheck $f
 	sleep 0.1 #good enough for rate limiting :3
 done
+
+#write overview of processed files to log
+echo -e "\n[OVERVIEW]\n" >> "${LOG_DIR}/latest.log"
+for i in "${suc[@]}"; do
+	echo -e "${GREEN}+${NC} $i" >> "${LOG_DIR}/latest.log"
+done
+for i in "${fail[@]}"; do
+	echo -e "${RED}-${NC} $i" >> "${LOG_DIR}/latest.log"
+done
+#create a time-stamped log file
+cp "${LOG_DIR}/latest.log" "${LOG_DIR}/$(date +%y-%m-%d-%H%M).log"
+
