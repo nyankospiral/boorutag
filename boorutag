@@ -51,12 +51,11 @@ Example: boorutag -oU -S d -d ~/Pictures/homework
   !-d [dir]   run on all files of given directory
   -t [IX]     tag format to write [(I)PTC and/or (X)MP] (default: IX) 
   -l [dir]    where to save log file to (defaults to '${CONFIG_DIR}/boorutag/latest.log')	
+  -u [0-3]	  upscaling mode, check site result for higher-res image, [0 - never, 1 - prompt for each, 2 - always, 3 - always & overwrite file]
   !-S [site]  search only in given site [(g)elbooru, (d)anbooru, (r)ule34]
   -m	      generate and try matching against output of md5sum (THIS WILL WIPE EXIF DATA)
   -M	      same as -m, but also renames the file to correct MD5 if match is found
   !-r 	      disable reverse image search fallback
-  !-u 	      always download full-res image for samples if available
-  !-U 	      same as -u but OVERWRITES the image (its gone for good!)
   -o	      overwrite existing tag/exif data
   -s	      silent mode (no output)
   !-v	      verbose mode (more output)
@@ -64,7 +63,7 @@ Example: boorutag -oU -S d -d ~/Pictures/homework
 	exit 1
 }
 
-while getopts ":d:t:l:S:mMruUosvh" opt; do
+while getopts ":d:t:l:u:S:mMrosvhw" opt; do
 	case $opt in
 		d) if [[ -d ${OPTARG} ]]; then directory=${OPTARG}; else
 			logMsg 4 "flag -d | directory '${OPTARG}' not found or invalid"; exit 2; fi ;;
@@ -72,6 +71,10 @@ while getopts ":d:t:l:S:mMruUosvh" opt; do
 			logMsg 4 "flag -t | invalid option '${OPTARG}' - valid options are [I,X,IX]"; exit 2; else
 			tag_format="${OPTARG^^}"; fi ;;
 		l) if [[ -d ${OPTARG} ]]; then LOG_DIR=${OPTARG}; else logMsg 4 "flag -l | expected directory but got '${OPTARG}'"; exit 2; fi ;;
+		u) case ${OPTARG} in
+			[0-3]) always_upscale=${OPTARG} ;;
+			*) logMsg 4 "flag -S | invalid option '${OPTARG}' | boorutag -h for usage"; exit 2 ;;
+		esac ;;
 		S) shopt -s nocasematch
 			case ${OPTARG} in 
 				g|gelbooru) ;;
@@ -82,12 +85,11 @@ while getopts ":d:t:l:S:mMruUosvh" opt; do
 		m) gen_md5="1" ;;
 		M) gen_md5="2" ;;
 		r) reverse_fallback="0" ;;
-		u) always_upscale="1" ;;
-		U) always_upscale="2" ;;
 		o) overwrite_tags="1" ;;
 		s) silent="1" ;;
 		v) verbose="1" ;;
 		h) usage ;;
+		w) weebtrash="$(base64 -d <<< "bnlhISBhbGwgZmlsZXMgcHdvY2Vzc2VkIHNlbnBhaX4K")" ;;
 		?) logMsg 4 "Invalid flag -$OPTARG"; exit 2 ;;
 		:) logMsg 4 "OPTARG' requires an argument"; exit 2 ;;
 	esac
@@ -96,7 +98,7 @@ if [[ $# -eq 0 ]]; then usage; fi
 shift "$(($OPTIND -1))"
 tag_format=${tag_format:-XI}
 LOG_DIR="${LOG_DIR:-${CONFIG_DIR}}"
-echo -e "〜ボールタグ(v0.4)\n" > "${LOG_DIR}/latest.log"
+echo -e "〜ボールタグ(v0.5)\n" > "${LOG_DIR}/latest.log"
 
 
 
@@ -131,27 +133,73 @@ getMD5 () {
 }
 
 #get xml from booru api and return tags
+# expects $1, data to extract, $2 MD5 string (or leave empty for last result)
 fetchBooruData () {
-	local xml_result=$(curl --silent --request GET "${gel_link}$1")
-	local xml_tags=$(xmllint --xpath '//tags/text()' - <<<${xml_result} 2>/dev/null )
-	if [[ $? -gt 0 || -z ${xml_tags} ]]; then 
+	if [[ $1 != "xml" && -z ${XML} ]]; then logMsg 2 "fetchBooruData() was called but XML is empty?"; return 2; fi;
+	case $1 in 
+		"xml")
+			local data_out=$(curl --silent --request GET "${gel_link}$2") ;;
+		"tags") 
+			local data_out=$(xmllint --xpath '//tags/text()' - <<<${XML} 2>/dev/null ) ;;
+		"file") 
+			local data_out=$(xmllint --xpath '//file_url/text()' - <<<${XML} 2>/dev/null ) ;;
+		"size")
+			local data_out=$(xmllint --xpath '//width/text()' - <<<${XML} 2>/dev/null ) ;;
+	esac
+	if [[ $? -gt 0 || -z ${data_out} ]]; then 
+		logMsg 2 "{fetchBooruData() failed, case '$1', MD5: ${2:-'not set'}, data_out ${data_out:-'not set'}"
 		return 1
 	else
-		echo ${xml_tags}
+		echo ${data_out}
 	fi
 }
 
-# sample (low-res) detection
+# sample (low-res) detection, expects file in
 sampleCheck () {
-	if [[ $1 =~ "sample" ]]; then
-		logMsg 1 "File '$1' detected as sample, download high-res? [Y/n]"
-		read -r -s -n 1 ans
-		case $ans in
-			[Nn]) return 1 ;;
-			[Yy]|"") sampleDownload INEEDTOPUTTHEDATAHEREPLEASEDONTFORGETJINGLEJINGLE ;;
-			*) echo 'Invalid option, answer Y or N.'; sampleCheck $1 ;;
+	local regex="([0-9]*) x [0-9]*"
+	if [[ $1 =~ "sample" ]] || ! [[ $(exiv2 $1 2>&1) =~ ${regex} && ${BASH_REMATCH[1]} =~ $(fetchBooruData "size") ]]; then
+		case ${always_upscale} in 
+			1) 
+				logMsg 1 "File '$1' detected as sample, download high-res? [Y/r/n] (r to replace)" 
+				read -r -s -n 1 ans
+				case $ans in
+					[Nn]) return 2 ;;
+					[Yy]|"") sampleDownload 1 $1 ;;
+					[Rr]) sampleDownload 3 $1 ;;
+					*) echo 'Invalid option, answer Y or N.'; sampleCheck $1 ;;
+					#omg look at this beautiful triangle.. waow.
+				esac
+				;;
+			2|3) 
+				logMsg 1 "File '$1' detected as sample, downloading high-res..."
+				sampleDownload ${always_upscale} $1
+				;;
+			*) logMsg 2 "Tried checking for sample with invalid -u opt, how did we get here??"
 		esac
+	else return 1;
 	fi
+}
+
+# get full sized image from booru
+# expects $1 [0-3] (3 replaces original file), $2 file
+sampleDownload () {
+	#shouldnt need to check that it exists in database, getMD5 should have caught that
+	#slicing code below may also be sufficient, but extenstion sometimes differ so lets play it safe
+	# local file_link="${MD5:0:2}/${MD5:2:2}/${MD5}"
+	if local file_link=$(fetchBooruData "file" 1 ${MD5}); then
+		local dir="${2%/*}"
+		[[ $2 != */* ]] && dir=
+
+		if curl -H "Referer: https://gelbooru.com/" -o "${dir:+$dir/}${file_link##*/}" ${file_link}; then 
+			cur_file="${dir:+$dir/}${file_link##*/}"
+			logMsg 1 "Sucessfully downloaded high-res file ${cur_file}"
+		fi
+
+	else
+		logMsg 2 "Something went wrong downloading sample"
+		return 1
+	fi
+
 
 }
 
@@ -167,7 +215,7 @@ setTags () {
 	shift
 	local tags="$@"
 	#remove all exif, iptc, and xmp data
-	if [[ ${overwrite_tags} -eq 1 ]]; then exiv2 rm ${file}; fi
+	if [[ ${overwrite_tags} -eq 1 ]]; then exiv2 -d eIx ${file}; fi
 
 	#iterate through tags and apply to IPTC 
 	if [[ $tag_format =~ I ]]; then
@@ -189,50 +237,55 @@ setTags () {
 		if [[ ${file} != ${new} ]]; then
 		  	mv ${file} ${new}
 			logMsg 1 "renamed '${file}' > '${new}'"
+			cur_file=${new}
 		fi
 	fi
-
-	suc+=($new)
-
 }
 
-declare -a suc=()
-declare -a fail=()
+total_args=$#
+progress () { 
+	[[ ! ${silent} -gt 0 ]] && echo -e "[${GREEN}${#suc[@]}${NC}|${RED}${#fail[@]}${NC}|${total_args}] - $1" 
+}
+
 for f in "$@"; do
-	[[ ! ${silent} -gt 0 ]] && echo -e "[${GREEN}${#suc[@]}${NC}|${RED}${#fail[@]}${NC}|$#] - $f"
+	cur_file=$f
+	progress "${cur_file}"
 
 	#check that file exists and is r/w capable
-	if ! [[ -r $f && -w $f ]]; then
-		logMsg 2 "Read/write error on file '$f', skipping."
-		fail+=("$f [r/w error]")
+	if ! [[ -r $cur_file && -w $cur_file ]]; then
+		logMsg 2 "Read/write error on file '$cur_file', skipping."
+		fail+=("$cur_file [r/w error]")
 		continue
 	fi
 	
 	#check that file is a valid image
 	if ! [[ "${f##*.}" =~ jpg|jpeg|png ]]; then
-		logMsg 2 "File type error on file '$f', skipping."
-		fail+=("$f [filetype error]")
+		logMsg 2 "File type error on file '$cur_file', skipping."
+		fail+=("$cur_file [filetype error]")
 		continue
 	fi
 
 	#skip file if tags exist and overwrite is disabled
-	if [[ $overwrite_tags -ne 1 && ! $(checkTags $f) ]]; then
-		logMsg 1 "Tags exist for file '$f', skipping."
-		fail+=("$f [tags exist]")
+	if [[ $overwrite_tags -ne 1 && ! $(checkTags $cur_file) ]]; then
+		logMsg 1 "Tags exist for file '$cur_file', skipping."
+		fail+=("$cur_file [tags exist]")
 		continue
 	fi
 
-	MD5=$(getMD5 $f)
-	if Tags=$(fetchBooruData ${MD5}); then 
-		# sampleCheck $f
-		setTags $f ${Tags}
+	MD5=$(getMD5 $cur_file)
+	XML=$(fetchBooruData "xml" ${MD5})
+	if Tags=$(fetchBooruData "tags"); then 
+		[[ ${always_upscale} -ne 0 ]] && sampleCheck $cur_file
+		setTags $cur_file ${Tags}
 	else
-		logMsg 2 "failed to retrieve tags for '$f', skipping"
-		fail+=("$f [tag fail]")
+		logMsg 2 "failed to retrieve tags for '$cur_file', skipping"
+		fail+=("$cur_file [tag fail]")
 		continue
 	fi
+	suc+=($cur_file)
 	sleep 0.1 #good enough for rate limiting :3
 done
+progress "${weebtrash:-All done!} Log written at '${LOG_DIR}'"
 
 #write overview of processed files to log
 echo -e "\n[OVERVIEW]\n" >> "${LOG_DIR}/latest.log"
